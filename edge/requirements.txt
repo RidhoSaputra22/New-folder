@@ -1,0 +1,17 @@
+# Core dependencies
+requests
+python-dotenv
+numpy
+opencv-python-headless
+flask
+flask-cors
+
+# YOLOv5 (install torch manually if needed)
+torch
+torchvision
+
+ultralytics
+pandas
+tqdm
+seaborn
+requests

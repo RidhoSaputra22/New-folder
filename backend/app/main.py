@@ -1,0 +1,619 @@
+"""
+Visitor Monitoring API - Backend FastAPI
+Sesuai dengan Project Concept: monitoring pengunjung perpustakaan dengan YOLOv5
+Database: SQLite (tanpa Docker)
+"""
+from datetime import datetime, date
+from typing import List, Optional, Any
+
+from fastapi import FastAPI, Depends, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+
+from sqlmodel import Session, select, func
+
+from .settings import settings
+from .db import init_db, get_session, engine
+from .models import (
+    Role, User, Camera, CountingArea, 
+    VisitorDaily, VisitEvent, DailyStats
+)
+from .auth import (
+    hash_password, verify_password, create_access_token, 
+    get_user_by_username, get_role_by_name, require_role
+)
+
+app = FastAPI(title="Visitor Monitoring API", version="1.0.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_list(),
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ==================== Pydantic Schemas ====================
+
+class LoginIn(BaseModel):
+    username: str
+    password: str
+
+class TokenOut(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+
+class UserCreate(BaseModel):
+    username: str
+    password: str
+    full_name: str
+    role: str = "OPERATOR"
+
+class UserOut(BaseModel):
+    user_id: int
+    username: str
+    full_name: str
+    role: str
+    is_active: bool
+
+class CameraCreate(BaseModel):
+    name: str
+    location: Optional[str] = None
+    stream_url: Optional[str] = None
+
+class CameraUpdate(BaseModel):
+    name: Optional[str] = None
+    location: Optional[str] = None
+    stream_url: Optional[str] = None
+    is_active: Optional[bool] = None
+
+class CameraOut(BaseModel):
+    camera_id: int
+    name: str
+    location: Optional[str] = None
+    stream_url: Optional[str] = None
+    is_active: bool
+
+class CountingAreaCreate(BaseModel):
+    camera_id: int
+    name: str
+    roi_polygon: Any  # [[x,y], ...]
+    direction_mode: str = "BOTH"
+
+class CountingAreaUpdate(BaseModel):
+    name: Optional[str] = None
+    roi_polygon: Optional[Any] = None
+    direction_mode: Optional[str] = None
+    is_active: Optional[bool] = None
+
+class CountingAreaOut(BaseModel):
+    area_id: int
+    camera_id: int
+    name: str
+    roi_polygon: Any
+    direction_mode: str
+    is_active: bool
+
+class EventIn(BaseModel):
+    """Payload dari edge worker saat ada event kunjungan"""
+    camera_id: int
+    area_id: Optional[int] = None
+    event_time: datetime
+    track_id: Optional[str] = None
+    visitor_key: str
+    direction: Optional[str] = None  # IN/OUT
+    confidence_avg: Optional[float] = None
+
+class DailyStatsOut(BaseModel):
+    stat_date: date
+    camera_id: int
+    total_events: int
+    unique_visitors: int
+    total_in: int
+    total_out: int
+
+class DashboardSummary(BaseModel):
+    """Summary untuk dashboard"""
+    date: date
+    total_events: int
+    unique_visitors: int
+    total_in: int
+    total_out: int
+
+
+# ==================== Startup Event ====================
+
+@app.on_event("startup")
+def on_startup():
+    """Initialize database and seed data"""
+    init_db()
+    
+    with Session(engine) as session:
+        # Create roles if not exist
+        admin_role = get_role_by_name(session, "ADMIN")
+        if not admin_role:
+            admin_role = Role(name="ADMIN")
+            session.add(admin_role)
+            session.commit()
+            session.refresh(admin_role)
+        
+        operator_role = get_role_by_name(session, "OPERATOR")
+        if not operator_role:
+            operator_role = Role(name="OPERATOR")
+            session.add(operator_role)
+            session.commit()
+            session.refresh(operator_role)
+        
+        # Create admin user if not exist
+        admin = get_user_by_username(session, settings.admin_username)
+        if not admin:
+            admin = User(
+                username=settings.admin_username,
+                password_hash=hash_password(settings.admin_password),
+                full_name=settings.admin_fullname,
+                role_id=admin_role.role_id,
+                is_active=True,
+            )
+            session.add(admin)
+            session.commit()
+
+        # Create default camera if not exist
+        cam = session.exec(select(Camera)).first()
+        if not cam:
+            cam = Camera(
+                name=settings.default_camera_name,
+                location=settings.default_camera_location,
+                stream_url=settings.default_camera_stream,
+                is_active=True,
+            )
+            session.add(cam)
+            session.commit()
+            session.refresh(cam)
+            
+            # Create default counting area
+            area = CountingArea(
+                camera_id=cam.camera_id,
+                name="Gate Masuk",
+                roi_polygon=[[50, 50], [1230, 50], [1230, 670], [50, 670]],
+                direction_mode="BOTH",
+                is_active=True,
+            )
+            session.add(area)
+            session.commit()
+
+
+# ==================== Health Check ====================
+
+@app.get("/health")
+async def health():
+    """Health check endpoint"""
+    try:
+        with Session(engine) as session:
+            session.exec(select(User).limit(1))
+        
+        return {
+            "status": "healthy", 
+            "timestamp": datetime.utcnow().isoformat(),
+            "database": "sqlite"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=503, detail={
+            "status": "unhealthy",
+            "error": str(e),
+        })
+
+# ==================== Auth Endpoints ====================
+
+@app.post("/api/auth/login", response_model=TokenOut)
+def login(payload: LoginIn, session: Session = Depends(get_session)):
+    user = get_user_by_username(session, payload.username)
+    if not user or not verify_password(payload.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Invalid username/password")
+    if not user.is_active:
+        raise HTTPException(status_code=401, detail="User is inactive")
+    return TokenOut(access_token=create_access_token(user.username))
+
+@app.get("/api/me", response_model=UserOut)
+def me(user: User = Depends(require_role("ADMIN", "OPERATOR")), session: Session = Depends(get_session)):
+    role = session.get(Role, user.role_id)
+    return UserOut(
+        user_id=user.user_id, 
+        username=user.username, 
+        full_name=user.full_name,
+        role=role.name if role else "UNKNOWN",
+        is_active=user.is_active
+    )
+
+
+# ==================== User Management ====================
+
+@app.post("/api/users", response_model=UserOut)
+def create_user(payload: UserCreate, session: Session = Depends(get_session), _: User = Depends(require_role("ADMIN"))):
+    if get_user_by_username(session, payload.username):
+        raise HTTPException(status_code=400, detail="Username already exists")
+    
+    role = get_role_by_name(session, payload.role.upper())
+    if not role:
+        raise HTTPException(status_code=400, detail=f"Role '{payload.role}' not found")
+    
+    u = User(
+        username=payload.username, 
+        password_hash=hash_password(payload.password), 
+        full_name=payload.full_name,
+        role_id=role.role_id,
+        is_active=True
+    )
+    session.add(u)
+    session.commit()
+    session.refresh(u)
+    return UserOut(
+        user_id=u.user_id, 
+        username=u.username, 
+        full_name=u.full_name,
+        role=role.name,
+        is_active=u.is_active
+    )
+
+@app.get("/api/users", response_model=List[UserOut])
+def list_users(session: Session = Depends(get_session), _: User = Depends(require_role("ADMIN"))):
+    users = session.exec(select(User)).all()
+    result = []
+    for u in users:
+        role = session.get(Role, u.role_id)
+        result.append(UserOut(
+            user_id=u.user_id, 
+            username=u.username, 
+            full_name=u.full_name,
+            role=role.name if role else "UNKNOWN",
+            is_active=u.is_active
+        ))
+    return result
+
+
+# ==================== Camera Management ====================
+
+@app.get("/api/cameras", response_model=List[CameraOut])
+def list_cameras(session: Session = Depends(get_session), _: User = Depends(require_role("ADMIN", "OPERATOR"))):
+    cameras = session.exec(select(Camera)).all()
+    return [CameraOut(
+        camera_id=c.camera_id, 
+        name=c.name, 
+        location=c.location,
+        stream_url=c.stream_url, 
+        is_active=c.is_active
+    ) for c in cameras]
+
+@app.get("/api/cameras/{camera_id}", response_model=CameraOut)
+def get_camera(camera_id: int, session: Session = Depends(get_session), _: User = Depends(require_role("ADMIN", "OPERATOR"))):
+    cam = session.get(Camera, camera_id)
+    if not cam:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    return CameraOut(
+        camera_id=cam.camera_id, 
+        name=cam.name, 
+        location=cam.location,
+        stream_url=cam.stream_url, 
+        is_active=cam.is_active
+    )
+
+@app.post("/api/cameras", response_model=CameraOut)
+def create_camera(payload: CameraCreate, session: Session = Depends(get_session), _: User = Depends(require_role("ADMIN"))):
+    cam = Camera(
+        name=payload.name,
+        location=payload.location,
+        stream_url=payload.stream_url,
+        is_active=True
+    )
+    session.add(cam)
+    session.commit()
+    session.refresh(cam)
+    return CameraOut(
+        camera_id=cam.camera_id, 
+        name=cam.name, 
+        location=cam.location,
+        stream_url=cam.stream_url, 
+        is_active=cam.is_active
+    )
+
+@app.put("/api/cameras/{camera_id}", response_model=CameraOut)
+def update_camera(camera_id: int, payload: CameraUpdate, session: Session = Depends(get_session), _: User = Depends(require_role("ADMIN"))):
+    cam = session.get(Camera, camera_id)
+    if not cam:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    
+    data = payload.model_dump(exclude_unset=True)
+    for k, v in data.items():
+        setattr(cam, k, v)
+    session.add(cam)
+    session.commit()
+    session.refresh(cam)
+    return CameraOut(
+        camera_id=cam.camera_id, 
+        name=cam.name, 
+        location=cam.location,
+        stream_url=cam.stream_url, 
+        is_active=cam.is_active
+    )
+
+
+# ==================== Counting Area Management ====================
+
+@app.get("/api/cameras/{camera_id}/areas", response_model=List[CountingAreaOut])
+def list_counting_areas(camera_id: int, session: Session = Depends(get_session), _: User = Depends(require_role("ADMIN", "OPERATOR"))):
+    areas = session.exec(select(CountingArea).where(CountingArea.camera_id == camera_id)).all()
+    return [CountingAreaOut(
+        area_id=a.area_id,
+        camera_id=a.camera_id,
+        name=a.name,
+        roi_polygon=a.roi_polygon,
+        direction_mode=a.direction_mode,
+        is_active=a.is_active
+    ) for a in areas]
+
+@app.post("/api/areas", response_model=CountingAreaOut)
+def create_counting_area(payload: CountingAreaCreate, session: Session = Depends(get_session), _: User = Depends(require_role("ADMIN"))):
+    cam = session.get(Camera, payload.camera_id)
+    if not cam:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    
+    area = CountingArea(
+        camera_id=payload.camera_id,
+        name=payload.name,
+        roi_polygon=payload.roi_polygon,
+        direction_mode=payload.direction_mode,
+        is_active=True
+    )
+    session.add(area)
+    session.commit()
+    session.refresh(area)
+    return CountingAreaOut(
+        area_id=area.area_id,
+        camera_id=area.camera_id,
+        name=area.name,
+        roi_polygon=area.roi_polygon,
+        direction_mode=area.direction_mode,
+        is_active=area.is_active
+    )
+
+@app.put("/api/areas/{area_id}", response_model=CountingAreaOut)
+def update_counting_area(area_id: int, payload: CountingAreaUpdate, session: Session = Depends(get_session), _: User = Depends(require_role("ADMIN"))):
+    area = session.get(CountingArea, area_id)
+    if not area:
+        raise HTTPException(status_code=404, detail="Counting area not found")
+    
+    data = payload.model_dump(exclude_unset=True)
+    for k, v in data.items():
+        setattr(area, k, v)
+    session.add(area)
+    session.commit()
+    session.refresh(area)
+    return CountingAreaOut(
+        area_id=area.area_id,
+        camera_id=area.camera_id,
+        name=area.name,
+        roi_polygon=area.roi_polygon,
+        direction_mode=area.direction_mode,
+        is_active=area.is_active
+    )
+
+
+# ==================== Event Ingestion (dari Edge) ====================
+
+@app.post("/api/events/ingest")
+def ingest_event(payload: EventIn, session: Session = Depends(get_session)):
+    """
+    Endpoint untuk menerima event kunjungan dari edge worker.
+    Logika pengunjung unik harian:
+    - Cek apakah (visit_date, visitor_key) sudah ada di visitor_daily
+    - Jika belum ada → insert visitor_daily (unik bertambah)
+    - Jika sudah ada → update last_seen_at saja (unik tidak bertambah)
+    """
+    # Get default area if not specified
+    area_id = payload.area_id
+    if not area_id:
+        area = session.exec(
+            select(CountingArea).where(CountingArea.camera_id == payload.camera_id, CountingArea.is_active == True)
+        ).first()
+        area_id = area.area_id if area else 1
+    
+    # Create visit event
+    ev = VisitEvent(
+        camera_id=payload.camera_id, 
+        area_id=area_id,
+        event_time=payload.event_time, 
+        track_id=payload.track_id,
+        visitor_key=payload.visitor_key,
+        direction=payload.direction,
+        confidence_avg=payload.confidence_avg
+    )
+    session.add(ev)
+
+    # Handle unique daily visitor
+    visit_date = payload.event_time.date()
+    is_new_unique = False
+    
+    visitor_daily = session.exec(
+        select(VisitorDaily).where(
+            VisitorDaily.visit_date == visit_date,
+            VisitorDaily.visitor_key == payload.visitor_key
+        )
+    ).first()
+    
+    if not visitor_daily:
+        # New unique visitor for today
+        visitor_daily = VisitorDaily(
+            visit_date=visit_date,
+            visitor_key=payload.visitor_key,
+            first_seen_at=payload.event_time,
+            last_seen_at=payload.event_time
+        )
+        session.add(visitor_daily)
+        is_new_unique = True
+    else:
+        # Update last seen time
+        visitor_daily.last_seen_at = payload.event_time
+
+    # Update daily stats
+    stats = session.exec(
+        select(DailyStats).where(
+            DailyStats.stat_date == visit_date,
+            DailyStats.camera_id == payload.camera_id
+        )
+    ).first()
+    
+    if not stats:
+        stats = DailyStats(
+            stat_date=visit_date,
+            camera_id=payload.camera_id,
+            total_events=0,
+            unique_visitors=0,
+            total_in=0,
+            total_out=0
+        )
+        session.add(stats)
+    
+    stats.total_events += 1
+    if is_new_unique:
+        stats.unique_visitors += 1
+    if payload.direction == "IN":
+        stats.total_in += 1
+    elif payload.direction == "OUT":
+        stats.total_out += 1
+    stats.last_updated_at = datetime.utcnow()
+
+    session.commit()
+    return {"ok": True, "is_new_unique": is_new_unique}
+
+
+# ==================== Statistics Endpoints ====================
+
+@app.get("/api/stats/daily", response_model=List[DailyStatsOut])
+def stats_daily(
+    day: Optional[date] = None, 
+    from_date: Optional[date] = None,
+    to_date: Optional[date] = None,
+    camera_id: Optional[int] = None,
+    session: Session = Depends(get_session), 
+    _: User = Depends(require_role("ADMIN", "OPERATOR"))
+):
+    """Get daily statistics with optional filters"""
+    q = select(DailyStats)
+    
+    if day:
+        q = q.where(DailyStats.stat_date == day)
+    if from_date:
+        q = q.where(DailyStats.stat_date >= from_date)
+    if to_date:
+        q = q.where(DailyStats.stat_date <= to_date)
+    if camera_id:
+        q = q.where(DailyStats.camera_id == camera_id)
+    
+    rows = session.exec(q.order_by(DailyStats.stat_date.desc())).all()
+    return [DailyStatsOut(
+        stat_date=r.stat_date, 
+        camera_id=r.camera_id, 
+        total_events=r.total_events,
+        unique_visitors=r.unique_visitors,
+        total_in=r.total_in, 
+        total_out=r.total_out
+    ) for r in rows]
+
+@app.get("/api/stats/summary", response_model=DashboardSummary)
+def stats_summary(
+    day: Optional[date] = None,
+    session: Session = Depends(get_session), 
+    _: User = Depends(require_role("ADMIN", "OPERATOR"))
+):
+    """Get summary for dashboard (aggregated across all cameras)"""
+    target_date = day or date.today()
+    
+    stats = session.exec(
+        select(DailyStats).where(DailyStats.stat_date == target_date)
+    ).all()
+    
+    total_events = sum(s.total_events for s in stats)
+    unique_visitors = sum(s.unique_visitors for s in stats)
+    total_in = sum(s.total_in for s in stats)
+    total_out = sum(s.total_out for s in stats)
+    
+    return DashboardSummary(
+        date=target_date,
+        total_events=total_events,
+        unique_visitors=unique_visitors,
+        total_in=total_in,
+        total_out=total_out
+    )
+
+
+# ==================== Reports ====================
+
+@app.get("/api/reports/csv")
+def report_csv(
+    from_day: date, 
+    to_day: date, 
+    camera_id: Optional[int] = None,
+    session: Session = Depends(get_session), 
+    _: User = Depends(require_role("ADMIN", "OPERATOR"))
+):
+    """Export daily statistics to CSV"""
+    import io, csv
+    
+    out = io.StringIO()
+    writer = csv.writer(out)
+    writer.writerow(["date", "camera_id", "total_events", "unique_visitors", "total_in", "total_out"])
+    
+    q = select(DailyStats).where(
+        DailyStats.stat_date >= from_day, 
+        DailyStats.stat_date <= to_day
+    )
+    if camera_id:
+        q = q.where(DailyStats.camera_id == camera_id)
+    
+    rows = session.exec(q.order_by(DailyStats.stat_date)).all()
+    for r in rows:
+        writer.writerow([
+            r.stat_date.isoformat(), 
+            r.camera_id, 
+            r.total_events,
+            r.unique_visitors, 
+            r.total_in, 
+            r.total_out
+        ])
+    
+    return {
+        "filename": f"laporan_pengunjung_{from_day}_{to_day}.csv", 
+        "csv": out.getvalue()
+    }
+
+@app.get("/api/reports/events")
+def report_events(
+    from_date: date,
+    to_date: date,
+    camera_id: Optional[int] = None,
+    limit: int = 1000,
+    session: Session = Depends(get_session),
+    _: User = Depends(require_role("ADMIN", "OPERATOR"))
+):
+    """Get detailed visit events for reporting"""
+    from datetime import datetime as dt
+    
+    q = select(VisitEvent).where(
+        VisitEvent.event_time >= dt.combine(from_date, dt.min.time()),
+        VisitEvent.event_time <= dt.combine(to_date, dt.max.time())
+    )
+    if camera_id:
+        q = q.where(VisitEvent.camera_id == camera_id)
+    
+    events = session.exec(q.order_by(VisitEvent.event_time.desc()).limit(limit)).all()
+    
+    return [{
+        "event_id": e.event_id,
+        "camera_id": e.camera_id,
+        "area_id": e.area_id,
+        "event_time": e.event_time.isoformat(),
+        "track_id": e.track_id,
+        "visitor_key": e.visitor_key,
+        "direction": e.direction,
+        "confidence_avg": e.confidence_avg
+    } for e in events]

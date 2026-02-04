@@ -1,0 +1,15 @@
+# FastAPI & Web
+fastapi==0.112.2
+uvicorn[standard]==0.30.6
+
+# Database - SQLite (no PostgreSQL needed)
+sqlmodel==0.0.22
+
+# Authentication
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+bcrypt==3.2.2
+
+# Settings
+pydantic-settings==2.4.0
+
