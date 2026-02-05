@@ -7,13 +7,52 @@ import cv2
 
 from .config import CONF_TH, IOU_TH, DEVICE, WEIGHTS, REPO
 
+# Check Intel XPU availability
+INTEL_XPU_AVAILABLE = False
+try:
+    import intel_extension_for_pytorch as ipex
+    import torch
+    if hasattr(torch, 'xpu') and torch.xpu.is_available():
+        INTEL_XPU_AVAILABLE = True
+        print(f"[detection] Intel XPU available: {torch.xpu.get_device_name(0)}")
+except ImportError:
+    pass
+
+
+def get_optimal_device():
+    """Determine the best available device for inference"""
+    import torch
+    
+    # If user specified a device, try to use it
+    if DEVICE and DEVICE != "auto":
+        if DEVICE == "xpu" and INTEL_XPU_AVAILABLE:
+            return "xpu"
+        elif DEVICE == "cuda" and torch.cuda.is_available():
+            return "cuda"
+        elif DEVICE == "cpu":
+            return "cpu"
+        else:
+            print(f"[detection] Warning: Requested device '{DEVICE}' not available, falling back...")
+    
+    # Auto-detect best device
+    if INTEL_XPU_AVAILABLE:
+        return "xpu"
+    elif torch.cuda.is_available():
+        return "cuda"
+    else:
+        return "cpu"
+
 
 def load_yolov5_model():
-    """Load YOLOv5 via torch.hub"""
+    """Load YOLOv5 via torch.hub with Intel XPU support"""
     import torch
     
     # Suppress torch.cuda.amp.autocast deprecation warning
     warnings.filterwarnings("ignore", message=".*torch.cuda.amp.autocast.*", category=FutureWarning)
+    
+    # Determine device
+    device = get_optimal_device()
+    print(f"[detection] Loading YOLOv5 model on device: {device}")
     
     if REPO and WEIGHTS:
         model = torch.hub.load(REPO, "custom", path=WEIGHTS, source="local")
@@ -25,7 +64,20 @@ def load_yolov5_model():
     model.conf = CONF_TH
     model.iou = IOU_TH
     model.classes = [0]  # person only
-    model.to(DEVICE)
+    
+    # Move model to device
+    model.to(device)
+    
+    # Optimize with Intel Extension for PyTorch if using XPU
+    if device == "xpu" and INTEL_XPU_AVAILABLE:
+        try:
+            import intel_extension_for_pytorch as ipex
+            model = ipex.optimize(model)
+            print("[detection] Model optimized with Intel Extension for PyTorch")
+        except Exception as e:
+            print(f"[detection] Warning: IPEX optimization failed: {e}")
+    
+    print(f"[detection] YOLOv5 model loaded successfully on {device}")
     return model
 
 

@@ -617,3 +617,36 @@ def report_events(
         "direction": e.direction,
         "confidence_avg": e.confidence_avg
     } for e in events]
+
+
+@app.post("/api/admin/reset-db")
+def reset_database(
+    session: Session = Depends(get_session),
+    user: User = Depends(require_role("ADMIN"))
+):
+    """
+    Reset semua data pengunjung (visitor_daily, visit_events, daily_stats)
+    Hanya bisa diakses oleh ADMIN
+    """
+    try:
+        # Delete all visitor data
+        session.exec(select(VisitEvent)).all()
+        for event in session.exec(select(VisitEvent)).all():
+            session.delete(event)
+        
+        for visitor in session.exec(select(VisitorDaily)).all():
+            session.delete(visitor)
+        
+        for stat in session.exec(select(DailyStats)).all():
+            session.delete(stat)
+        
+        session.commit()
+        
+        return {
+            "status": "success",
+            "message": "Database visitor berhasil direset",
+            "reset_by": user.username
+        }
+    except Exception as e:
+        session.rollback()
+        raise HTTPException(status_code=500, detail=f"Error reset database: {str(e)}")

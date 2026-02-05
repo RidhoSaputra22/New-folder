@@ -1,0 +1,6 @@
+[
+  {
+    "type": "sqlite",
+    "path": "d:\\APLIKASI LARAVEL\\visitor-monitoring-mvp-yolov5\\backend\\visitors.db"
+  }
+]

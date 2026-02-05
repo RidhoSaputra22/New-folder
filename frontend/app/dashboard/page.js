@@ -19,6 +19,7 @@ export default function Dashboard() {
   const [summary, setSummary] = useState(null);
   const [daily, setDaily] = useState([]);
   const [err, setErr] = useState("");
+  const [resetStatus, setResetStatus] = useState("");
   const day = useMemo(() => todayISO(), []);
 
   async function load() {
@@ -55,6 +56,50 @@ export default function Dashboard() {
     const t = setInterval(load, 5000);
     return () => clearInterval(t);
   }, [day]);
+
+  async function handleResetDB() {
+    if (!confirm("⚠️ PERINGATAN: Ini akan menghapus SEMUA data pengunjung (visitor_daily, visit_events, daily_stats). Yakin ingin melanjutkan?")) {
+      return;
+    }
+    
+    setResetStatus("loading");
+    setErr("");
+    
+    const token = localStorage.getItem("token");
+    if (!token) {
+      setErr("No token. Please login.");
+      setResetStatus("");
+      return;
+    }
+    
+    try {
+      const response = await fetch(`${API_BASE}/api/admin/reset-db`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json"
+        }
+      });
+      
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({ detail: "Reset failed" }));
+        throw new Error(errData.detail || "Reset database gagal");
+      }
+      
+      const result = await response.json();
+      setResetStatus("success");
+      
+      // Reload data setelah reset
+      setTimeout(() => {
+        load();
+        setResetStatus("");
+      }, 2000);
+      
+    } catch (e) {
+      setErr(e.message || "Error reset database");
+      setResetStatus("error");
+    }
+  }
 
   const totalEvents = summary?.total_events || daily.reduce((s, r) => s + r.total_events, 0);
   const uniqueVisitors = summary?.unique_visitors || daily.reduce((s, r) => s + r.unique_visitors, 0);
@@ -128,6 +173,42 @@ export default function Dashboard() {
           GET {API_BASE}/api/reports/csv?from_day={day}&to_day={day}
         </code>
       </section>
+
+      {me && me.role === "ADMIN" && (
+        <section style={{ marginTop: 24, padding: 20, border: "2px solid #f44336", borderRadius: 10, backgroundColor: "#fff5f5" }}>
+          <h2 style={{ color: "#d32f2f", margin: "0 0 12px 0" }}>⚠️ Reset Database (Admin Only)</h2>
+          <p style={{ opacity: 0.8, marginBottom: 16 }}>
+            Menghapus SEMUA data pengunjung (visitor_daily, visit_events, daily_stats). 
+            Data kamera dan user tidak akan terhapus.
+          </p>
+          
+          <button
+            onClick={handleResetDB}
+            disabled={resetStatus === "loading"}
+            style={{
+              padding: "12px 24px",
+              backgroundColor: resetStatus === "success" ? "#4CAF50" : "#f44336",
+              color: "white",
+              border: "none",
+              borderRadius: 8,
+              cursor: resetStatus === "loading" ? "wait" : "pointer",
+              fontSize: 14,
+              fontWeight: 600,
+              opacity: resetStatus === "loading" ? 0.6 : 1
+            }}
+          >
+            {resetStatus === "loading" ? "⏳ Mereset..." : resetStatus === "success" ? "✅ Reset Berhasil!" : "🗑️ Reset Database"}
+          </button>
+          
+          {resetStatus === "error" && err && (
+            <p style={{ color: "#d32f2f", marginTop: 12, fontWeight: 500 }}>❌ {err}</p>
+          )}
+          
+          {resetStatus === "success" && (
+            <p style={{ color: "#2e7d32", marginTop: 12, fontWeight: 500 }}>✅ Database berhasil direset. Data sedang dimuat ulang...</p>
+          )}
+        </section>
+      )}
     </main>
   );
 }

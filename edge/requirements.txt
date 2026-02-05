@@ -18,3 +18,7 @@ requests
 # DeepSORT with ReID
 deep-sort-realtime
 scipy
+
+# Intel GPU (Iris Xe) support - optional
+# Install via: pip install intel-extension-for-pytorch
+# intel-extension-for-pytorch

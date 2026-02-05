@@ -12,7 +12,7 @@ import time
 
 from core.config import MODE
 from core.streaming import start_flask_server
-from core.loops import fake_loop, real_loop
+from core.loops import real_loop
 
 
 def main():
@@ -26,11 +26,8 @@ def main():
     time.sleep(2)
     
     # Run appropriate loop based on mode
-    if MODE == "fake":
-        fake_loop()
-    else:
-        real_loop()
-
+    real_loop()
+   
 
 if __name__ == "__main__":
     main()

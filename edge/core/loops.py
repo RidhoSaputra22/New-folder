@@ -21,44 +21,6 @@ from .visualization import draw_roi_polygon, draw_bounding_boxes, draw_info_over
 from .reid import update_track_embedding, get_visitor_key_for_track, cleanup_old_tracks, reset_daily_cache
 
 
-def fake_loop():
-    """Mode FAKE: generate random visitor data untuk testing"""
-    print("[edge] running in FAKE mode - generating random data")
-    token = login_token()
-
-    visitor_counter = 0
-    while True:
-        # Generate random visitors
-        num_visitors = random.randint(0, 3)
-        now = datetime.now(timezone.utc)
-        date_str = now.strftime("%Y-%m-%d")
-        
-        for _ in range(num_visitors):
-            visitor_counter += 1
-            track_id = f"fake_{visitor_counter}"
-            visitor_key = generate_visitor_key(CAMERA_ID, visitor_counter % 50, date_str)
-            direction = random.choice(["IN", "OUT", None])
-            
-            payload = {
-                "camera_id": CAMERA_ID,
-                "event_time": now.isoformat(),
-                "track_id": track_id,
-                "visitor_key": visitor_key,
-                "direction": direction,
-                "confidence_avg": round(random.uniform(0.7, 0.95), 2)
-            }
-            
-            result = send_visitor_event(payload, token)
-            if result["success"]:
-                is_new = result["data"].get("is_new_unique", False)
-                status = "NEW" if is_new else "EXISTING"
-                print(f"[edge] sent visitor {visitor_key[:8]}... dir={direction} [{status}] -> {result['status_code']}")
-            else:
-                print(f"[edge] ERROR {result['status_code']}: {result.get('error', 'Unknown')}")
-        
-        time.sleep(POST_INTERVAL)
-
-
 def real_loop():
     """Mode REAL: YOLOv5 detection + DeepSORT tracking + ReID visitor counting"""
     tracker_mode = "DeepSORT+ReID" if DEEPSORT_AVAILABLE else "CentroidTracker"
