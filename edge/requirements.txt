@@ -15,3 +15,6 @@ pandas
 tqdm
 seaborn
 requests
+# DeepSORT with ReID
+deep-sort-realtime
+scipy

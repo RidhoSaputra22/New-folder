@@ -204,7 +204,7 @@ Agar sesuai requirement “masuk berkali-kali dalam sehari tetap 1”:
 
 `visitor_key` bisa dibuat dengan pendekatan MVP:
 
-* **Minimal**: gabungan `camera_id + track_id + tanggal` (cukup untuk single camera & kondisi sederhana)
+
 * **Lebih kuat** (disarankan skripsi): gunakan tracker + ReID embedding (mis. DeepSORT) lalu hash embedding → lebih stabil walau track_id berubah
 
 // janagan gunakan docker biarkan saya run manual
