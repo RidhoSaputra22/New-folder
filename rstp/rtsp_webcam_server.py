@@ -1,7 +1,15 @@
 """
-HTTP Webcam Stream Server
-Untuk testing dengan webcam lokal.
-Jalankan ini jika ingin stream webcam via HTTP.
+HTTP Webcam Stream Server (OPSIONAL)
+
+Server ini TIDAK wajib dijalankan.
+Edge worker sudah bisa membaca webcam langsung jika EDGE_STREAM_URL=0 di .env
+
+Jalankan ini HANYA jika:
+  - Ingin menjalankan kamera di PC BERBEDA dari edge worker
+  - Ingin share webcam stream ke beberapa consumer
+  - Webcam tidak bisa dibuka langsung oleh edge (masalah driver)
+
+Jika webcam + edge di PC yang sama, cukup set EDGE_STREAM_URL=0 di .env
 """
 import cv2
 from flask import Flask, Response
@@ -39,5 +47,5 @@ def health():
     return {"status": "ok", "camera": "webcam"}
 
 if __name__ == "__main__":
-    print("[webcam] Stream akan tersedia di: http://localhost:8080/video")
+    print("[webcam] Stream akan tersedia di: http://localhost:8081/video")
     app.run(host="0.0.0.0", port=8081, threaded=True)

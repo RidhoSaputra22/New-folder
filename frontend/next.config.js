@@ -1,59 +1,35 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  // Output mode for Docker
-  output: "standalone",
-  
-  // Optimize for production
-  experimental: {
-    outputFileTracingRoot: process.cwd(),
-  },
-  
-  // API configuration
+  // API proxy — forward /api/* requests to backend
   async rewrites() {
     return [
       {
         source: '/api/:path*',
-        destination: process.env.NODE_ENV === 'production' 
-          ? 'http://backend:8000/:path*'
-          : 'http://localhost:8000/:path*',
+        destination: 'http://localhost:8000/:path*',
       },
     ];
   },
-  
+
   // Environment variables
   env: {
-    BACKEND_URL: process.env.NODE_ENV === 'production' 
-      ? 'http://backend:8000'
-      : 'http://localhost:8000',
-    RTSP_URL: process.env.NODE_ENV === 'production'
-      ? 'http://rtsp-server:8080/video'
-      : 'http://localhost:8080/video',
+    BACKEND_URL: 'http://localhost:8000',
   },
-  
+
   // Image optimization
   images: {
-    domains: ['localhost', 'backend', 'rtsp-server'],
-    unoptimized: true, // For Docker environment
+    domains: ['localhost'],
+    unoptimized: true,
   },
-  
-  // Headers for RTSP streaming
+
+  // Headers for video streaming
   async headers() {
     return [
       {
-        source: '/video',
+        source: '/video_feed',
         headers: [
-          {
-            key: 'Cache-Control',
-            value: 'no-cache, no-store, must-revalidate',
-          },
-          {
-            key: 'Pragma',
-            value: 'no-cache',
-          },
-          {
-            key: 'Expires',
-            value: '0',
-          },
+          { key: 'Cache-Control', value: 'no-cache, no-store, must-revalidate' },
+          { key: 'Pragma', value: 'no-cache' },
+          { key: 'Expires', value: '0' },
         ],
       },
     ];

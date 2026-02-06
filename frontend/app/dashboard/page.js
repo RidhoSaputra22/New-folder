@@ -237,13 +237,21 @@ function CameraView() {
   const [streamUrl] = useState(STREAM_URL);
   const imgRef = useRef(null);
 
+  // Derive health URL from stream URL (same server)
+  const healthUrl = STREAM_URL.replace(/\/video_feed$/, '/health');
+
   useEffect(() => {
     const checkStream = async () => {
       try {
-        const response = await fetch("http://localhost:5000/health");
+        const response = await fetch(healthUrl);
         if (response.ok) {
-          setLoading(false);
-          setError("");
+          const data = await response.json();
+          if (data.status === 'ok') {
+            setLoading(false);
+            setError("");
+          } else {
+            throw new Error("Edge worker belum menerima frame dari kamera.");
+          }
         } else {
           throw new Error("Stream server not responding");
         }
@@ -257,7 +265,7 @@ function CameraView() {
     const interval = setInterval(checkStream, 10000);
     
     return () => clearInterval(interval);
-  }, []);
+  }, [healthUrl]);
 
   const handleImageError = () => {
     setError("Failed to load camera stream. Kamera mungkin busy atau disconnected.");
@@ -349,7 +357,7 @@ function CameraView() {
       
       {!loading && !error && (
         <p style={{ fontSize: "12px", opacity: 0.7, margin: "8px 0 0 0" }}>
-          ✅ Live stream dari edge server. Feed yang sama digunakan untuk deteksi YOLO.
+          ✅ Live stream dari edge server (YOLO + tracking). Satu server saja, tidak perlu Flask terpisah.
         </p>
       )}
     </div>

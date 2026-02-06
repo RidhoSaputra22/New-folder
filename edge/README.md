@@ -1,6 +1,22 @@
 # Edge Worker - Modular Structure
 
-Kode edge worker telah direfactor menjadi struktur modular untuk kemudahan maintenance dan skalabilitas.
+Edge worker mendeteksi manusia (YOLOv5), tracking, dan menyajikan video feed yang sudah diproses.
+
+## Arsitektur
+
+```
+Kamera (webcam/RTSP/HTTP)
+     │
+     ▼
+[worker.py] ──── Flask server (port 5000)
+     │                  └── /video_feed (MJPEG, frame + overlay)
+     │                  └── /health
+     ▼
+[Backend API] ◄── kirim event kunjungan
+```
+
+**Catatan**: Edge worker langsung membaca webcam (EDGE_STREAM_URL=0).
+Tidak perlu menjalankan `rstp/rtsp_webcam_server.py` terpisah.
 
 ## Struktur Folder
 
@@ -80,17 +96,13 @@ python worker.py
 
 ### Mode yang Tersedia
 
-1. **FAKE Mode** - Testing dengan data random
-   ```bash
-   # Di .env
-   EDGE_MODE=fake
-   ```
-
-2. **REAL Mode** - Production dengan YOLOv5
-   ```bash
-   # Di .env
-   EDGE_MODE=real
-   ```
+Mode REAL dengan YOLOv5:
+```bash
+# Di .env
+EDGE_MODE=real
+EDGE_STREAM_URL=0          # webcam langsung
+# EDGE_STREAM_URL=rtsp://ip:port/stream   # IP camera
+```
 
 ## Keuntungan Refactoring
 

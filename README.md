@@ -4,42 +4,77 @@ Sistem monitoring jumlah pengunjung perpustakaan berbasis CCTV dengan YOLOv5 + t
 
 ## Fitur Utama
 
-- ✅ Deteksi manusia menggunakan **YOLOv5**
-- ✅ **Tracking** agar tidak menghitung orang yang sama berkali-kali
-- ✅ **Pengunjung Unik Harian** (masuk 2-3 kali dalam sehari tetap dihitung 1 kali)
-- ✅ **Dashboard** dengan statistik real-time
-- ✅ Filter per tanggal/periode
-- ✅ Export laporan CSV
+- Deteksi manusia menggunakan **YOLOv5**
+- **Tracking** (DeepSORT / Centroid Tracker)
+- **Pengunjung Unik Harian** (masuk 2-3 kali dalam sehari tetap dihitung 1 kali)
+- **Dashboard** dengan statistik real-time + live camera preview
+- Filter per tanggal/periode
+- Export laporan CSV
+
+## Arsitektur (Tanpa Docker)
+
+```
+              ┌──────────────────────────────────────┐
+              │            Frontend (Next.js)         │
+              │           http://localhost:3000       │
+              └──────┬───────────────────┬───────────┘
+                     │ API               │ Video feed
+                     ▼                   ▼
+    ┌────────────────────┐   ┌───────────────────────────┐
+    │  Backend (FastAPI)  │   │  Edge Worker (port 5000)   │
+    │  http://localhost   │   │  /video_feed (MJPEG)       │
+    │  :8000              │◄──│  YOLO + Tracking           │
+    │  SQLite DB          │   │  Kirim event → backend     │
+    └────────────────────┘   └───────────┬───────────────┘
+                                         │
+                              ┌──────────┴──────────┐
+                              │   Kamera (sumber)    │
+                              │  webcam / RTSP / HTTP│
+                              └─────────────────────┘
+```
+
+**Hanya butuh 3 terminal**: Backend, Edge Worker, Frontend.
+`rstp/rtsp_webcam_server.py` TIDAK perlu dijalankan jika webcam di PC yang sama.
 
 ## Teknologi
 
-- **Backend**: FastAPI + SQLite
-- **Edge/AI**: YOLOv5 + OpenCV + Centroid Tracker
-- **Frontend**: Next.js
+- **Backend**: FastAPI + SQLite (SQLModel)
+- **Edge/AI**: YOLOv5 + OpenCV + DeepSORT/CentroidTracker + Flask (MJPEG stream)
+- **Frontend**: Next.js 14
 
 ## Struktur Folder
 
 ```
-visitor-monitoring-mvp-yolov5/
-├── backend/           # FastAPI backend
+├── backend/           # FastAPI backend + SQLite
 │   ├── app/
 │   │   ├── main.py    # API endpoints
-│   │   ├── models.py  # Database models
+│   │   ├── models.py  # Database models (SQLModel)
 │   │   ├── db.py      # Database connection
-│   │   ├── auth.py    # Authentication
+│   │   ├── auth.py    # JWT Authentication
 │   │   └── settings.py
 │   └── requirements.txt
-├── edge/              # Edge worker (YOLO detection)
-│   ├── worker.py      # Main detection & tracking
+├── edge/              # Edge worker (YOLO detection + streaming)
+│   ├── worker.py      # Entry point: jalankan YOLO + serve video
+│   ├── core/
+│   │   ├── loops.py       # Main detection loop
+│   │   ├── streaming.py   # Flask MJPEG server (port 5000)
+│   │   ├── detection.py   # YOLOv5 wrapper
+│   │   ├── tracker.py     # DeepSORT / CentroidTracker
+│   │   ├── reid.py        # Re-identification
+│   │   ├── visualization.py # Draw overlay
+│   │   ├── api_client.py  # Kirim event ke backend
+│   │   └── config.py      # Environment variables
 │   └── requirements.txt
 ├── frontend/          # Next.js dashboard
 │   ├── app/
-│   │   ├── page.js
-│   │   ├── login/
-│   │   ├── dashboard/
-│   │   └── camera/
+│   │   ├── page.js        # Redirect ke login
+│   │   ├── login/         # Login page
+│   │   ├── dashboard/     # Dashboard + live camera
+│   │   └── camera/        # Konfigurasi kamera & ROI
 │   └── package.json
-└── .env               # Configuration
+├── rstp/              # (OPSIONAL) Webcam HTTP relay server
+│   └── rtsp_webcam_server.py
+└── .env               # Semua konfigurasi
 ```
 
 ## Cara Menjalankan (Manual, tanpa Docker)
@@ -48,54 +83,39 @@ visitor-monitoring-mvp-yolov5/
 
 ```bash
 cd backend
-
-# Create virtual environment
 python -m venv venv
-venv\Scripts\activate  # Windows
-# source venv/bin/activate  # Linux/Mac
-
-# Install dependencies
+venv\Scripts\activate          # Windows
 pip install -r requirements.txt
-
-# Run backend
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-Backend akan berjalan di: http://localhost:8000
+Backend: http://localhost:8000
 
 ### 2. Setup Edge Worker
 
 ```bash
 cd edge
-
-# Create virtual environment (bisa pakai venv yang sama atau beda)
 python -m venv venv
 venv\Scripts\activate
-
-# Install dependencies
 pip install -r requirements.txt
-
-# Run edge worker
 python worker.py
 ```
 
 Edge worker akan:
-- Streaming video di: http://localhost:5000/video_feed
-- Mengirim event ke backend secara otomatis
+- Baca kamera dari `EDGE_STREAM_URL` (default: webcam `0`)
+- Deteksi + tracking manusia
+- Kirim event ke backend
+- Serve video feed di: http://localhost:5000/video_feed
 
 ### 3. Setup Frontend
 
 ```bash
 cd frontend
-
-# Install dependencies
 npm install
-
-# Run development server
 npm run dev
 ```
 
-Frontend akan berjalan di: http://localhost:3000
+Frontend: http://localhost:3000
 
 ## Konfigurasi (.env)
 
@@ -107,30 +127,35 @@ ADMIN_USERNAME=admin
 ADMIN_PASSWORD=admin123
 DATABASE_URL=sqlite:///./visitors.db
 
-# Edge
-EDGE_MODE=fake           # fake (random data) | real (YOLO detection)
+# Edge — Sumber kamera
+EDGE_MODE=real
 EDGE_CAMERA_ID=1
-EDGE_STREAM_URL=0        # 0 = webcam, atau URL stream
+EDGE_STREAM_URL=0        # "0" = webcam langsung, "rtsp://..." = IP cam
+EDGE_STREAM_PORT=5000    # Port video feed hasil YOLO
 BACKEND_URL=http://localhost:8000
 
 # Frontend
 NEXT_PUBLIC_API_BASE=http://localhost:8000
+NEXT_PUBLIC_STREAM_URL=http://localhost:5000/video_feed
 ```
 
-## Mode Edge Worker
+## Kamera: Webcam vs RTSP
 
-### Mode FAKE (Testing)
+### Webcam Langsung (paling mudah)
 ```env
-EDGE_MODE=fake
+EDGE_STREAM_URL=0
 ```
-Generate data random untuk testing tanpa kamera.
+Edge worker langsung buka webcam index 0. **Tidak perlu menjalankan file lain.**
 
-### Mode REAL (Production)
+### IP Camera (RTSP)
 ```env
-EDGE_MODE=real
-EDGE_STREAM_URL=0                    # Webcam
-# atau
-EDGE_STREAM_URL=rtsp://ip:port/stream  # IP Camera
+EDGE_STREAM_URL=rtsp://192.168.1.100:554/stream
+```
+
+### HTTP Relay (opsional, kasus khusus)
+Jika kamera di PC lain, jalankan `rstp/rtsp_webcam_server.py` di PC kamera:
+```env
+EDGE_STREAM_URL=http://192.168.1.50:8081/video
 ```
 
 ## Database Schema

@@ -51,9 +51,25 @@ def real_loop():
     cap = None
 
     def open_capture(url: str):
-        """Open video capture"""
+        """
+        Open video capture.
+        Supports:
+          - Webcam index: "0", "1" → langsung buka webcam, TIDAK perlu rtsp server terpisah
+          - HTTP stream:  "http://..." → MJPEG stream dari IP camera / rtsp server
+          - RTSP stream:  "rtsp://..." → IP camera langsung
+        """
         if url.isdigit():
-            c = cv2.VideoCapture(int(url))
+            idx = int(url)
+            print(f"[edge] Opening webcam index {idx} directly (no RTSP server needed)")
+            # Try different backends for Windows
+            for backend in [cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY]:
+                c = cv2.VideoCapture(idx, backend)
+                if c.isOpened():
+                    print(f"[edge] Webcam opened with backend: {backend}")
+                    c.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                    return c
+            # Fallback without backend
+            c = cv2.VideoCapture(idx)
         else:
             c = cv2.VideoCapture(url)
         c.set(cv2.CAP_PROP_BUFFERSIZE, 1)
