@@ -20,6 +20,10 @@ from .detection import load_yolov5_model, parse_roi, point_in_roi
 from .visualization import draw_roi_polygon, draw_bounding_boxes, draw_info_overlay
 from .reid import update_track_embedding, get_visitor_key_for_track, cleanup_old_tracks, reset_daily_cache
 
+# Standard frame resolution — must match the frontend ROI editor (NATIVE_W × NATIVE_H)
+FRAME_W = 1280
+FRAME_H = 720
+
 
 def real_loop():
     """Mode REAL: YOLOv5 detection + DeepSORT tracking + ReID visitor counting"""
@@ -75,6 +79,10 @@ def real_loop():
         c.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         return c
 
+    # Debounce: visitor_key -> last_event_time (prevent duplicate IN/OUT within cooldown)
+    last_event_time: Dict[str, float] = {}
+    EVENT_COOLDOWN = 10.0  # seconds – same visitor_key won't fire again within this window
+
     while True:
         now = time.time()
         today = datetime.now().strftime("%Y-%m-%d")
@@ -82,9 +90,13 @@ def real_loop():
         # Reset visitor states if date changed
         if today != current_date:
             visitor_states = {}
+            last_event_time = {}
             current_date = today
             reset_daily_cache(today)  # Reset ReID embedding cache
-            print(f"[edge] New day: {today}, reset visitor tracking")
+            # Reset in_roi flag on ALL existing tracks so they fire IN for the new day
+            for tid, tr in tracker.tracks.items():
+                tr.in_roi = False
+            print(f"[edge] New day: {today}, reset visitor tracking + track ROI states")
 
         # Refresh config from backend
         if now - last_cfg_fetch > CONFIG_REFRESH or last_cfg_fetch == 0:
@@ -140,6 +152,10 @@ def real_loop():
             time.sleep(1)
             continue
 
+        # Resize frame to standard resolution so ROI coordinates always match
+        if frame.shape[1] != FRAME_W or frame.shape[0] != FRAME_H:
+            frame = cv2.resize(frame, (FRAME_W, FRAME_H))
+
         # Buat copy untuk drawing
         display_frame = frame.copy()
 
@@ -148,14 +164,12 @@ def real_loop():
         det = results.xyxy[0].detach().cpu().numpy() if hasattr(results, "xyxy") else np.zeros((0, 6), dtype=np.float32)
 
         # Prepare detections for tracker: (x1, y1, x2, y2, confidence)
+        # Pass ALL person detections to tracker (not just ROI-filtered)
+        # so tracks outside ROI are still maintained → enables OUT detection
         detections: List[Tuple[float, float, float, float, float]] = []
         
         for x1, y1, x2, y2, conf, cls in det:
-            cx = (x1 + x2) / 2.0
-            cy = (y1 + y2) / 2.0
-            # Check if detection is in ROI
-            if point_in_roi(roi, cx, cy):
-                detections.append((float(x1), float(y1), float(x2), float(y2), float(conf)))
+            detections.append((float(x1), float(y1), float(x2), float(y2), float(conf)))
 
         # Update tracker (DeepSORT needs frame for ReID feature extraction)
         if DEEPSORT_AVAILABLE:
@@ -169,7 +183,8 @@ def real_loop():
         cleanup_old_tracks(list(tracks.keys()))
 
         # Process tracks and send events
-        now_time = datetime.now(timezone.utc)
+        # Use local datetime (consistent with frontend todayISO() and backend visit_date)
+        now_time = datetime.now()
         
         for tid, tr in tracks.items():
             in_roi_now = point_in_roi(roi, tr.centroid[0], tr.centroid[1])
@@ -185,46 +200,59 @@ def real_loop():
             # Calculate average confidence from detections
             avg_confidence = np.mean([d[4] for d in detections]) if detections else 0.0
             
+            # Debounce key: visitor_key + direction
+            debounce_key_in = f"{visitor_key}_IN"
+            debounce_key_out = f"{visitor_key}_OUT"
+            
             # Detect ROI entry (visitor masuk)
             if (not tr.in_roi) and in_roi_now:
-                # Send event to backend
-                payload = {
-                    "camera_id": CAMERA_ID,
-                    "area_id": area_id,
-                    "event_time": now_time.isoformat(),
-                    "track_id": f"t{tid}",
-                    "visitor_key": visitor_key,
-                    "direction": "IN",
-                    "confidence_avg": round(avg_confidence, 4)
-                }
-                
-                result = send_visitor_event(payload, token)
-                if result["success"]:
-                    is_new = result["data"].get("is_new_unique", False)
-                    status = "NEW" if is_new else "EXISTING"
-                    visitor_states[tid] = {'is_new': is_new, 'direction': 'IN', 'visitor_key': visitor_key}
-                    print(f"[edge] Visitor IN: {visitor_key[:8]}... [{status}] -> {result['status_code']}")
+                # Check debounce: skip if same visitor already sent IN recently
+                if now - last_event_time.get(debounce_key_in, 0) >= EVENT_COOLDOWN:
+                    payload = {
+                        "camera_id": CAMERA_ID,
+                        "area_id": area_id,
+                        "event_time": now_time.isoformat(),
+                        "track_id": f"t{tid}",
+                        "visitor_key": visitor_key,
+                        "direction": "IN",
+                        "confidence_avg": round(avg_confidence, 4)
+                    }
+                    
+                    result = send_visitor_event(payload, token)
+                    if result["success"]:
+                        is_new = result["data"].get("is_new_unique", False)
+                        status = "NEW" if is_new else "EXISTING"
+                        visitor_states[tid] = {'is_new': is_new, 'direction': 'IN', 'visitor_key': visitor_key}
+                        last_event_time[debounce_key_in] = now
+                        print(f"[edge] Visitor IN: {visitor_key[:8]}... [{status}] -> {result['status_code']}")
+                    else:
+                        print(f"[edge] Failed to send: {result.get('error', 'Unknown')}")
                 else:
-                    print(f"[edge] Failed to send: {result.get('error', 'Unknown')}")
+                    # Debounced – still update display state
+                    visitor_states[tid] = {'is_new': False, 'direction': 'IN', 'visitor_key': visitor_key}
             
             # Detect ROI exit (visitor keluar)
             elif tr.in_roi and (not in_roi_now):
-                payload = {
-                    "camera_id": CAMERA_ID,
-                    "area_id": area_id,
-                    "event_time": now_time.isoformat(),
-                    "track_id": f"t{tid}",
-                    "visitor_key": visitor_key,
-                    "direction": "OUT",
-                    "confidence_avg": round(avg_confidence, 4)
-                }
-                
-                result = send_visitor_event(payload, token)
-                if result["success"]:
-                    visitor_states[tid]['direction'] = 'OUT'
-                    print(f"[edge] Visitor OUT: {visitor_key[:8]}... -> {result['status_code']}")
+                if now - last_event_time.get(debounce_key_out, 0) >= EVENT_COOLDOWN:
+                    payload = {
+                        "camera_id": CAMERA_ID,
+                        "area_id": area_id,
+                        "event_time": now_time.isoformat(),
+                        "track_id": f"t{tid}",
+                        "visitor_key": visitor_key,
+                        "direction": "OUT",
+                        "confidence_avg": round(avg_confidence, 4)
+                    }
+                    
+                    result = send_visitor_event(payload, token)
+                    if result["success"]:
+                        visitor_states[tid]['direction'] = 'OUT'
+                        last_event_time[debounce_key_out] = now
+                        print(f"[edge] Visitor OUT: {visitor_key[:8]}... -> {result['status_code']}")
+                    else:
+                        print(f"[edge] Failed to send: {result.get('error', 'Unknown')}")
                 else:
-                    print(f"[edge] Failed to send: {result.get('error', 'Unknown')}")
+                    visitor_states[tid]['direction'] = 'OUT'
             
             # Update state untuk visitor di dalam ROI
             elif in_roi_now:
@@ -233,6 +261,9 @@ def real_loop():
             
             tr.in_roi = in_roi_now
         
+        # Keep a raw copy BEFORE drawing any overlays (for ROI editor)
+        raw_frame = display_frame.copy()
+
         # Draw ROI polygon
         draw_roi_polygon(display_frame, roi)
         
@@ -243,8 +274,8 @@ def real_loop():
         info_lines = [f"Tracks: {len(tracks)} | {tracker_mode}"]
         draw_info_overlay(display_frame, info_lines)
         
-        # Update global frame for stream server
-        update_latest_frame(display_frame)
+        # Update global frame for stream server (processed + raw)
+        update_latest_frame(display_frame, raw_frame=raw_frame)
 
         # Small delay to prevent CPU overload
         time.sleep(0.03)

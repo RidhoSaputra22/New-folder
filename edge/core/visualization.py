@@ -18,10 +18,15 @@ def draw_bounding_boxes(frame: np.ndarray, tracks: Dict[int, Track], visitor_sta
     """
     Draw bounding boxes dengan status visitor pada frame
     States: NEW/EXISTING (unique visitor today), IN/OUT/IN_ROI (direction)
+    Hanya menggambar box untuk track yang berada di dalam ROI
     """
     for tid, tr in tracks.items():
         if tr.disappeared > 0:
             continue  # Skip tracks yang sedang disappeared
+        
+        # Hanya gambar box untuk track yang berada di dalam ROI
+        if not tr.in_roi:
+            continue
         
         x1, y1, x2, y2 = tr.bbox
         x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)

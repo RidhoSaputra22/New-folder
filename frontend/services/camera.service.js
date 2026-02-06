@@ -1,4 +1,11 @@
-import { get, post, put } from "./api";
+import { get, post, put, del } from "./api";
+
+/**
+ * GET /api/cameras — list all cameras.
+ */
+export function fetchCameras() {
+  return get("/api/cameras");
+}
 
 /**
  * GET /api/cameras/:id
@@ -8,10 +15,24 @@ export function fetchCamera(id = 1) {
 }
 
 /**
+ * POST /api/cameras — create new camera.
+ */
+export function createCamera(data) {
+  return post("/api/cameras", data);
+}
+
+/**
  * PUT /api/cameras/:id
  */
 export function updateCamera(id = 1, data) {
   return put(`/api/cameras/${id}`, data);
+}
+
+/**
+ * DELETE /api/cameras/:id — delete camera (admin only).
+ */
+export function deleteCamera(id) {
+  return del(`/api/cameras/${id}`);
 }
 
 /**
@@ -33,4 +54,11 @@ export function createArea(data) {
  */
 export function updateArea(areaId, data) {
   return put(`/api/areas/${areaId}`, data);
+}
+
+/**
+ * DELETE /api/areas/:id — delete counting area (admin only).
+ */
+export function deleteArea(areaId) {
+  return del(`/api/areas/${areaId}`);
 }

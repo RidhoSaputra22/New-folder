@@ -86,7 +86,7 @@ export default function CameraView() {
         alt="Camera Feed"
         onError={handleImageError}
         onLoad={handleImageLoad}
-        className={`w-full max-w-2xl rounded-lg bg-black ${loading || error ? "hidden" : "block"}`}
+        className={`w-full  rounded-lg bg-black ${loading || error ? "hidden" : "block"}`}
       />
 
       {!loading && !error && (

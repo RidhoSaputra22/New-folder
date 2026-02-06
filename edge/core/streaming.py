@@ -19,7 +19,8 @@ from flask_cors import CORS
 from .config import EDGE_STREAM_PORT, EDGE_STREAM_URL
 
 # Global variable for sharing latest frame with stream server
-latest_frame = None
+latest_frame = None        # processed frame (with ROI, bboxes, info overlay)
+latest_frame_raw = None     # raw frame (no overlay) for ROI editor
 frame_lock = threading.Lock()
 _frame_count = 0
 _last_frame_time = 0.0
@@ -29,13 +30,17 @@ flask_app = Flask(__name__)
 CORS(flask_app)
 
 
-def gen_frames():
+def gen_frames(raw=False):
     """Generate MJPEG stream frames from shared worker frame"""
     import cv2
-    print("[stream] Client connected to video feed")
+    label = "raw" if raw else "processed"
+    print(f"[stream] Client connected to video feed ({label})")
     while True:
         with frame_lock:
-            frame = latest_frame.copy() if latest_frame is not None else None
+            if raw:
+                frame = latest_frame_raw.copy() if latest_frame_raw is not None else None
+            else:
+                frame = latest_frame.copy() if latest_frame is not None else None
 
         if frame is None:
             time.sleep(0.05)
@@ -55,7 +60,14 @@ def gen_frames():
 @flask_app.route('/video_feed')
 def video_feed():
     """MJPEG stream endpoint — frame sudah diproses YOLO+tracking"""
-    return Response(gen_frames(),
+    return Response(gen_frames(raw=False),
+                    mimetype='multipart/x-mixed-replace; boundary=frame')
+
+
+@flask_app.route('/video_feed_raw')
+def video_feed_raw():
+    """MJPEG stream endpoint — frame TANPA overlay (untuk ROI editor)"""
+    return Response(gen_frames(raw=True),
                     mimetype='multipart/x-mixed-replace; boundary=frame')
 
 
@@ -78,10 +90,17 @@ def start_flask_server():
     flask_app.run(host='0.0.0.0', port=EDGE_STREAM_PORT, threaded=True, debug=False)
 
 
-def update_latest_frame(frame):
-    """Update the global latest frame (thread-safe)"""
-    global latest_frame, _frame_count, _last_frame_time
+def update_latest_frame(frame, raw_frame=None):
+    """Update the global latest frame (thread-safe)
+    
+    Args:
+        frame: Processed frame with ROI, bboxes, info overlay
+        raw_frame: Raw frame without any overlay (for ROI editor)
+    """
+    global latest_frame, latest_frame_raw, _frame_count, _last_frame_time
     with frame_lock:
         latest_frame = frame.copy()
+        if raw_frame is not None:
+            latest_frame_raw = raw_frame.copy()
         _frame_count += 1
         _last_frame_time = time.time()

@@ -2,5 +2,9 @@
   {
     "type": "sqlite",
     "path": "d:\\APLIKASI LARAVEL\\visitor-monitoring-mvp-yolov5\\backend\\visitors.db"
+  },
+  {
+    "type": "sqlite",
+    "path": "c:\\APLIKASI JACK\\New-folder\\backend\\visitors.db"
   }
 ]

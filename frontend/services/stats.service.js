@@ -15,10 +15,37 @@ export function fetchSummary(day) {
 }
 
 /**
- * GET /api/stats/daily?day=YYYY-MM-DD
+ * GET /api/stats/daily with optional date range.
+ * @param {string} day - single day (YYYY-MM-DD)
+ * @param {string} fromDate - start of range
+ * @param {string} toDate - end of range
  */
-export function fetchDaily(day) {
+export function fetchDaily(day, fromDate, toDate) {
+  if (fromDate && toDate) {
+    return get(`/api/stats/daily?from_date=${fromDate}&to_date=${toDate}`);
+  }
   return get(`/api/stats/daily?day=${day}`);
+}
+
+/**
+ * GET /api/reports/events — detailed visit events for reporting.
+ */
+export function fetchEvents(fromDate, toDate, cameraId) {
+  let url = `/api/reports/events?from_date=${fromDate}&to_date=${toDate}`;
+  if (cameraId) url += `&camera_id=${cameraId}`;
+  return get(url);
+}
+
+/**
+ * GET /api/visitors/daily — unique daily visitors.
+ */
+export function fetchVisitorDaily(fromDate, toDate) {
+  let url = `/api/visitors/daily`;
+  const params = [];
+  if (fromDate) params.push(`from_date=${fromDate}`);
+  if (toDate) params.push(`to_date=${toDate}`);
+  if (params.length) url += `?${params.join("&")}`;
+  return get(url);
 }
 
 /**

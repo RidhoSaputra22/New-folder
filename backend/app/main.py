@@ -8,6 +8,7 @@ from typing import List, Optional, Any
 
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from sqlmodel import Session, select, func
@@ -270,6 +271,59 @@ def list_users(session: Session = Depends(get_session), _: User = Depends(requir
         ))
     return result
 
+class UserUpdate(BaseModel):
+    full_name: Optional[str] = None
+    role: Optional[str] = None
+    password: Optional[str] = None
+    is_active: Optional[bool] = None
+
+@app.put("/api/users/{user_id}", response_model=UserOut)
+def update_user(user_id: int, payload: UserUpdate, session: Session = Depends(get_session), admin: User = Depends(require_role("ADMIN"))):
+    """Update user (admin only)"""
+    u = session.get(User, user_id)
+    if not u:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    if payload.full_name is not None:
+        u.full_name = payload.full_name
+    if payload.role is not None:
+        role = get_role_by_name(session, payload.role.upper())
+        if not role:
+            raise HTTPException(status_code=400, detail=f"Role '{payload.role}' not found")
+        u.role_id = role.role_id
+    if payload.password is not None:
+        u.password_hash = hash_password(payload.password)
+    if payload.is_active is not None:
+        u.is_active = payload.is_active
+    u.updated_at = datetime.utcnow()
+    
+    session.add(u)
+    session.commit()
+    session.refresh(u)
+    role = session.get(Role, u.role_id)
+    return UserOut(
+        user_id=u.user_id,
+        username=u.username,
+        full_name=u.full_name,
+        role=role.name if role else "UNKNOWN",
+        is_active=u.is_active
+    )
+
+@app.delete("/api/users/{user_id}")
+def delete_user(user_id: int, session: Session = Depends(get_session), admin: User = Depends(require_role("ADMIN"))):
+    """Deactivate/delete user (admin only). Cannot delete yourself."""
+    u = session.get(User, user_id)
+    if not u:
+        raise HTTPException(status_code=404, detail="User not found")
+    if u.user_id == admin.user_id:
+        raise HTTPException(status_code=400, detail="Tidak bisa menghapus akun sendiri")
+    
+    u.is_active = False
+    u.updated_at = datetime.utcnow()
+    session.add(u)
+    session.commit()
+    return {"ok": True, "message": f"User '{u.username}' dinonaktifkan"}
+
 
 # ==================== Camera Management ====================
 
@@ -336,6 +390,22 @@ def update_camera(camera_id: int, payload: CameraUpdate, session: Session = Depe
         is_active=cam.is_active
     )
 
+@app.delete("/api/cameras/{camera_id}")
+def delete_camera(camera_id: int, session: Session = Depends(get_session), _: User = Depends(require_role("ADMIN"))):
+    """Delete camera and its counting areas (admin only)"""
+    cam = session.get(Camera, camera_id)
+    if not cam:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    
+    # Delete associated counting areas first
+    areas = session.exec(select(CountingArea).where(CountingArea.camera_id == camera_id)).all()
+    for area in areas:
+        session.delete(area)
+    
+    session.delete(cam)
+    session.commit()
+    return {"ok": True, "message": f"Camera '{cam.name}' deleted"}
+
 
 # ==================== Counting Area Management ====================
 
@@ -396,6 +466,17 @@ def update_counting_area(area_id: int, payload: CountingAreaUpdate, session: Ses
         direction_mode=area.direction_mode,
         is_active=area.is_active
     )
+
+@app.delete("/api/areas/{area_id}")
+def delete_counting_area(area_id: int, session: Session = Depends(get_session), _: User = Depends(require_role("ADMIN"))):
+    """Delete counting area (admin only)"""
+    area = session.get(CountingArea, area_id)
+    if not area:
+        raise HTTPException(status_code=404, detail="Counting area not found")
+    
+    session.delete(area)
+    session.commit()
+    return {"ok": True, "message": f"Counting area '{area.name}' deleted"}
 
 
 # ==================== Event Ingestion (dari Edge) ====================
@@ -556,12 +637,12 @@ def report_csv(
     session: Session = Depends(get_session), 
     _: User = Depends(require_role("ADMIN", "OPERATOR"))
 ):
-    """Export daily statistics to CSV"""
+    """Export daily statistics to CSV as downloadable file"""
     import io, csv
     
     out = io.StringIO()
     writer = csv.writer(out)
-    writer.writerow(["date", "camera_id", "total_events", "unique_visitors", "total_in", "total_out"])
+    writer.writerow(["Tanggal", "Camera ID", "Total Event", "Pengunjung Unik", "Masuk", "Keluar"])
     
     q = select(DailyStats).where(
         DailyStats.stat_date >= from_day, 
@@ -581,10 +662,14 @@ def report_csv(
             r.total_out
         ])
     
-    return {
-        "filename": f"laporan_pengunjung_{from_day}_{to_day}.csv", 
-        "csv": out.getvalue()
-    }
+    out.seek(0)
+    filename = f"laporan_pengunjung_{from_day}_{to_day}.csv"
+    
+    return StreamingResponse(
+        iter([out.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
 
 @app.get("/api/reports/events")
 def report_events(
@@ -617,6 +702,57 @@ def report_events(
         "direction": e.direction,
         "confidence_avg": e.confidence_avg
     } for e in events]
+
+
+@app.delete("/api/events/{event_id}")
+def delete_event(event_id: int, session: Session = Depends(get_session), _: User = Depends(require_role("ADMIN"))):
+    """Delete a specific visit event (admin only)"""
+    ev = session.get(VisitEvent, event_id)
+    if not ev:
+        raise HTTPException(status_code=404, detail="Event not found")
+    session.delete(ev)
+    session.commit()
+    return {"ok": True, "message": "Event deleted"}
+
+@app.get("/api/visitors/daily")
+def list_visitor_daily(
+    from_date: Optional[date] = None,
+    to_date: Optional[date] = None,
+    limit: int = 500,
+    session: Session = Depends(get_session),
+    _: User = Depends(require_role("ADMIN", "OPERATOR"))
+):
+    """List unique daily visitors"""
+    from datetime import datetime as dt
+    
+    q = select(VisitorDaily)
+    if from_date:
+        q = q.where(VisitorDaily.visit_date >= from_date)
+    if to_date:
+        q = q.where(VisitorDaily.visit_date <= to_date)
+    
+    visitors = session.exec(q.order_by(VisitorDaily.visit_date.desc()).limit(limit)).all()
+    
+    return [{
+        "visitor_daily_id": v.visitor_daily_id,
+        "visit_date": v.visit_date.isoformat(),
+        "visitor_key": v.visitor_key,
+        "first_seen_at": v.first_seen_at.isoformat(),
+        "last_seen_at": v.last_seen_at.isoformat(),
+        "notes": v.notes
+    } for v in visitors]
+
+@app.get("/api/cameras/list/all", response_model=List[CameraOut])
+def list_all_cameras(session: Session = Depends(get_session), _: User = Depends(require_role("ADMIN", "OPERATOR"))):
+    """List all cameras (including inactive) for admin management"""
+    cameras = session.exec(select(Camera)).all()
+    return [CameraOut(
+        camera_id=c.camera_id, 
+        name=c.name, 
+        location=c.location,
+        stream_url=c.stream_url, 
+        is_active=c.is_active
+    ) for c in cameras]
 
 
 @app.post("/api/admin/reset-db")
