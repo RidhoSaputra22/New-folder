@@ -1,13 +1,16 @@
+import "./globals.css";
+import { AuthProvider } from "@/context/AuthContext";
+
 export const metadata = {
   title: "Visitor Monitoring",
-  description: "Monitoring jumlah pengunjung"
+  description: "Monitoring jumlah pengunjung perpustakaan",
 };
 
 export default function RootLayout({ children }) {
   return (
     <html lang="en">
-      <body style={{ fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif", margin: 0 }}>
-        {children}
+      <body>
+        <AuthProvider>{children}</AuthProvider>
       </body>
     </html>
   );
